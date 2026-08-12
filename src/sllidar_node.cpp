@@ -439,11 +439,11 @@ public:
         rclcpp::Time end_scan_time;
         double scan_duration;
 
-        std::vector<sl_lidar_response_measurement_node_hq_t> previous_nodes;
-
         sl_u64 previous_sdk_timestamp_us = 0;
+        size_t previous_node_count = 0;
 
-        bool have_previous_scan = false;
+        double estimated_point_duration = sample_duration;
+        bool have_timing_estimate = false;
         
         // Map SDK CLOCK_MONOTONIC timestamps into the ROS clock domain.
         // Assumes live system time (use_sim_time == false).
@@ -477,45 +477,76 @@ public:
             scan_duration = (end_scan_time - start_scan_time).seconds();
 
             if (op_result == SL_RESULT_OK) {
-                if (have_previous_scan  && !previous_nodes.empty()) {
+                // --------------------------------------------------
+                // Estimate actual point sampling interval
+                // --------------------------------------------------
+
+                if (previous_sdk_timestamp_us != 0 &&
+                    previous_node_count > 0) {
 
                     double previous_scan_period =
                         static_cast<double>(
-                            sdk_timestamp_us - previous_sdk_timestamp_us
+                            sdk_timestamp_us -
+                            previous_sdk_timestamp_us
                         ) / 1000000.0;
 
-                    double previous_point_duration =
+                    estimated_point_duration =
                         previous_scan_period /
-                        static_cast<double>(previous_nodes.size());
-                    
-                    int64_t previous_scan_start_ns =
-                        static_cast<int64_t>(previous_sdk_timestamp_us) * 1000LL
-                        + monotonic_to_ros_offset_ns;
+                        static_cast<double>(previous_node_count);
 
-                    rclcpp::Time previous_scan_start_ros(
-                        previous_scan_start_ns,
-                        this->get_clock()->get_clock_type()
-                    );
+                    have_timing_estimate = true;
+                }
 
-                    double header_age_ms =
-                        (this->now() - previous_scan_start_ros).seconds() * 1e3;
 
-                    RCLCPP_INFO(
-                        this->get_logger(),
-                        "CLOUD HEADER: stamp=%.6f s age_at_publish=%.3f ms",
-                        previous_scan_start_ros.seconds(),
-                        header_age_ms
-                    );
+                // --------------------------------------------------
+                // Convert current SDK scan timestamp into ROS time
+                // --------------------------------------------------
 
+                int64_t current_scan_start_ns =
+                    static_cast<int64_t>(sdk_timestamp_us) * 1000LL
+                    + monotonic_to_ros_offset_ns;
+
+                rclcpp::Time current_scan_start_ros(
+                    current_scan_start_ns,
+                    this->get_clock()->get_clock_type()
+                );
+
+                double header_age_ms =
+                    (this->now() - current_scan_start_ros).seconds() * 1e3;
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "POINT CLOUD: points=%zu "
+                    "point_dt=%.3f us "
+                    "header_age=%.3f ms",
+                    count,
+                    estimated_point_duration * 1e6,
+                    header_age_ms
+                );
+
+
+                // --------------------------------------------------
+                // Publish current raw scan immediately
+                // --------------------------------------------------
+                if (have_timing_estimate) {
                     publish_cloud(
                         cloud_pub,
-                        previous_nodes.data(),
-                        previous_nodes.size(),
-                        previous_scan_start_ros,
-                        previous_point_duration,
+                        nodes,
+                        count,
+                        current_scan_start_ros,
+                        estimated_point_duration,
                         frame_id
                     );
                 }
+                
+
+
+                // --------------------------------------------------
+                // Save timing information for next revolution
+                // --------------------------------------------------
+
+                previous_sdk_timestamp_us = sdk_timestamp_us;
+                previous_node_count = count;
 
 
                 // ================= DEBUG =================
@@ -546,7 +577,7 @@ public:
                                 "SYNC: index=%zu angle=%.2f deg time=%.3f ms",
                                 i,
                                 getAngle(nodes[i]),
-                                i * sample_duration * 1e3
+                                i * estimated_point_duration * 1e3
                             );
                         }
 
@@ -603,7 +634,7 @@ public:
                             nodes[i].dist_mm_q2 / 4.0 / 1000.0,
                             static_cast<unsigned>(nodes[i].quality >> 2),
                             static_cast<unsigned>(nodes[i].flag),
-                            i * sample_duration * 1e3
+                            i * estimated_point_duration * 1e3
                         );
                     }
 
@@ -620,17 +651,11 @@ public:
                             nodes[i].dist_mm_q2 / 4.0 / 1000.0,
                             static_cast<unsigned>(nodes[i].quality >> 2),
                             static_cast<unsigned>(nodes[i].flag),
-                            i * sample_duration * 1e3
+                            i * estimated_point_duration * 1e3
                         );
                     }
                 }
                 // =============== END DEBUG ===============
-
-                previous_nodes.assign(nodes, nodes + count);
-
-                previous_sdk_timestamp_us = sdk_timestamp_us;
-
-                have_previous_scan = true;
 
                 op_result = drv->ascendScanData(nodes, count);
                 float angle_min = DEG2RAD(0.0f);
