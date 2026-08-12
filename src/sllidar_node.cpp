@@ -44,6 +44,7 @@
 #include <limits>
 #include <algorithm>
 #include <vector>
+#include <time.h>
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
@@ -202,6 +203,15 @@ class SLlidarNode : public rclcpp::Node
     static float getAngle(const sl_lidar_response_measurement_node_hq_t& node)
     {
         return node.angle_z_q14 * 90.f / 16384.f;
+    }
+
+    static int64_t get_monotonic_time_ns()
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+
+        return static_cast<int64_t>(ts.tv_sec) * 1000000000LL
+            + static_cast<int64_t>(ts.tv_nsec);
     }
 
     void publish_cloud(
@@ -432,9 +442,21 @@ public:
         std::vector<sl_lidar_response_measurement_node_hq_t> previous_nodes;
 
         sl_u64 previous_sdk_timestamp_us = 0;
-        rclcpp::Time previous_ros_scan_start;
 
         bool have_previous_scan = false;
+        
+        // Map SDK CLOCK_MONOTONIC timestamps into the ROS clock domain.
+        // Assumes live system time (use_sim_time == false).
+
+        int64_t mono_before_ns = get_monotonic_time_ns();
+        rclcpp::Time ros_anchor = this->now();
+        int64_t mono_after_ns = get_monotonic_time_ns();
+
+        int64_t mono_anchor_ns =
+            (mono_before_ns + mono_after_ns) / 2;
+
+        int64_t monotonic_to_ros_offset_ns =
+            ros_anchor.nanoseconds() - mono_anchor_ns;
 
         while (rclcpp::ok() && !need_exit) {
             sl_lidar_response_measurement_node_hq_t nodes[8192];
@@ -455,7 +477,7 @@ public:
             scan_duration = (end_scan_time - start_scan_time).seconds();
 
             if (op_result == SL_RESULT_OK) {
-                if (have_previous_scan) {
+                if (have_previous_scan  && !previous_nodes.empty()) {
 
                     double previous_scan_period =
                         static_cast<double>(
@@ -465,25 +487,31 @@ public:
                     double previous_point_duration =
                         previous_scan_period /
                         static_cast<double>(previous_nodes.size());
+                    
+                    int64_t previous_scan_start_ns =
+                        static_cast<int64_t>(previous_sdk_timestamp_us) * 1000LL
+                        + monotonic_to_ros_offset_ns;
+
+                    rclcpp::Time previous_scan_start_ros(
+                        previous_scan_start_ns,
+                        this->get_clock()->get_clock_type()
+                    );
+
+                    double header_age_ms =
+                        (this->now() - previous_scan_start_ros).seconds() * 1e3;
 
                     RCLCPP_INFO(
                         this->get_logger(),
-                        "PUBLISH CLOUD: points=%zu "
-                        "scan_period=%.3f ms "
-                        "point_dt=%.3f us "
-                        "last_point_time=%.3f ms",
-                        previous_nodes.size(),
-                        previous_scan_period * 1e3,
-                        previous_point_duration * 1e6,
-                        (previous_nodes.size() - 1) *
-                            previous_point_duration * 1e3
+                        "CLOUD HEADER: stamp=%.6f s age_at_publish=%.3f ms",
+                        previous_scan_start_ros.seconds(),
+                        header_age_ms
                     );
 
                     publish_cloud(
                         cloud_pub,
                         previous_nodes.data(),
                         previous_nodes.size(),
-                        previous_ros_scan_start,
+                        previous_scan_start_ros,
                         previous_point_duration,
                         frame_id
                     );
@@ -601,7 +629,6 @@ public:
                 previous_nodes.assign(nodes, nodes + count);
 
                 previous_sdk_timestamp_us = sdk_timestamp_us;
-                previous_ros_scan_start = start_scan_time;
 
                 have_previous_scan = true;
 
