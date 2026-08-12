@@ -50,7 +50,7 @@ def generate_launch_description():
             description='Specifying whether or not to enable angle_compensate of scan data'),
 
         Node(
-            package='sllidar_ros2',
+            package='sllidar_ros2_spinning_lidar',
             executable='sllidar_node',
             name='sllidar_node',
             parameters=[{'channel_type':channel_type,
