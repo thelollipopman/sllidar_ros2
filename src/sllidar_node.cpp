@@ -43,6 +43,7 @@
 #include <signal.h>
 #include <limits>
 #include <algorithm>
+#include <vector>
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
@@ -208,7 +209,7 @@ class SLlidarNode : public rclcpp::Node
         sl_lidar_response_measurement_node_hq_t* nodes,
         size_t node_count,
         rclcpp::Time start,
-        double sample_duration,
+        double point_duration,
         std::string frame_id)
     {
         sensor_msgs::msg::PointCloud2 cloud;
@@ -263,7 +264,7 @@ class SLlidarNode : public rclcpp::Node
                 static_cast<float>(nodes[i].quality >> 2);
 
             *iter_time =
-                static_cast<float>(i * sample_duration);
+                static_cast<float>(i * point_duration);
         }
 
         pub->publish(cloud);
@@ -428,7 +429,12 @@ public:
         rclcpp::Time end_scan_time;
         double scan_duration;
 
+        std::vector<sl_lidar_response_measurement_node_hq_t> previous_nodes;
+
         sl_u64 previous_sdk_timestamp_us = 0;
+        rclcpp::Time previous_ros_scan_start;
+
+        bool have_previous_scan = false;
 
         while (rclcpp::ok() && !need_exit) {
             sl_lidar_response_measurement_node_hq_t nodes[8192];
@@ -449,17 +455,39 @@ public:
             scan_duration = (end_scan_time - start_scan_time).seconds();
 
             if (op_result == SL_RESULT_OK) {
+                if (have_previous_scan) {
 
-                double sdk_scan_period_ms = 0.0;
-
-                if (previous_sdk_timestamp_us != 0) {
-                    sdk_scan_period_ms =
+                    double previous_scan_period =
                         static_cast<double>(
                             sdk_timestamp_us - previous_sdk_timestamp_us
-                        ) / 1000.0;
-                }
+                        ) / 1000000.0;
 
-                previous_sdk_timestamp_us = sdk_timestamp_us;
+                    double previous_point_duration =
+                        previous_scan_period /
+                        static_cast<double>(previous_nodes.size());
+
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "PUBLISH CLOUD: points=%zu "
+                        "scan_period=%.3f ms "
+                        "point_dt=%.3f us "
+                        "last_point_time=%.3f ms",
+                        previous_nodes.size(),
+                        previous_scan_period * 1e3,
+                        previous_point_duration * 1e6,
+                        (previous_nodes.size() - 1) *
+                            previous_point_duration * 1e3
+                    );
+
+                    publish_cloud(
+                        cloud_pub,
+                        previous_nodes.data(),
+                        previous_nodes.size(),
+                        previous_ros_scan_start,
+                        previous_point_duration,
+                        frame_id
+                    );
+                }
 
 
                 // ================= DEBUG =================
@@ -468,18 +496,6 @@ public:
 
                 // Only print once every 10 scans
                 if (debug_scan_count % 10 == 0) {
-
-                    RCLCPP_INFO(
-                        this->get_logger(),
-                        "TIMING: sdk_timestamp=%llu us "
-                        "sdk_period=%.3f ms "
-                        "grab_duration=%.3f ms "
-                        "nominal_span=%.3f ms",
-                        static_cast<unsigned long long>(sdk_timestamp_us),
-                        sdk_scan_period_ms,
-                        scan_duration * 1e3,
-                        (count - 1) * sample_duration * 1e3
-                    );
 
                     size_t invalid_count = 0;
                     size_t sync_count = 0;
@@ -582,14 +598,12 @@ public:
                 }
                 // =============== END DEBUG ===============
 
-                publish_cloud(
-                    cloud_pub,
-                    nodes,
-                    count,
-                    start_scan_time,
-                    sample_duration,
-                    frame_id
-                );
+                previous_nodes.assign(nodes, nodes + count);
+
+                previous_sdk_timestamp_us = sdk_timestamp_us;
+                previous_ros_scan_start = start_scan_time;
+
+                have_previous_scan = true;
 
                 op_result = drv->ascendScanData(nodes, count);
                 float angle_min = DEG2RAD(0.0f);
