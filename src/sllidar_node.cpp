@@ -497,6 +497,18 @@ public:
                         scan_duration * 1e3
                     );
 
+                    double effective_sample_duration = scan_duration / static_cast<double>(count - 1);
+
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "nominal_dt=%.3f us effective_dt=%.3f us "
+                        "point_span=%.3f ms grab_duration=%.3f ms",
+                        sample_duration * 1e6,
+                        effective_sample_duration * 1e6,
+                        (count - 1) * sample_duration * 1e3,
+                        scan_duration * 1e3
+                    );
+
                     // Print first 5 points
                     size_t print_count = std::min<size_t>(5, count);
 
