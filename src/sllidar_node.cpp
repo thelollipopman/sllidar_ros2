@@ -427,16 +427,39 @@ public:
         rclcpp::Time start_scan_time;
         rclcpp::Time end_scan_time;
         double scan_duration;
+
+        sl_u64 previous_sdk_timestamp_us = 0;
+
         while (rclcpp::ok() && !need_exit) {
             sl_lidar_response_measurement_node_hq_t nodes[8192];
             size_t   count = _countof(nodes);
 
+            sl_u64 sdk_timestamp_us = 0;
+
             start_scan_time = this->now();
-            op_result = drv->grabScanDataHq(nodes, count);
+
+            op_result = drv->grabScanDataHqWithTimeStamp(
+                nodes,
+                count,
+                sdk_timestamp_us
+            );
+
             end_scan_time = this->now();
+
             scan_duration = (end_scan_time - start_scan_time).seconds();
 
             if (op_result == SL_RESULT_OK) {
+
+                double sdk_scan_period_ms = 0.0;
+
+                if (previous_sdk_timestamp_us != 0) {
+                    sdk_scan_period_ms =
+                        static_cast<double>(
+                            sdk_timestamp_us - previous_sdk_timestamp_us
+                        ) / 1000.0;
+                }
+
+                previous_sdk_timestamp_us = sdk_timestamp_us;
 
 
                 // ================= DEBUG =================
@@ -445,6 +468,18 @@ public:
 
                 // Only print once every 10 scans
                 if (debug_scan_count % 10 == 0) {
+
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "TIMING: sdk_timestamp=%llu us "
+                        "sdk_period=%.3f ms "
+                        "grab_duration=%.3f ms "
+                        "nominal_span=%.3f ms",
+                        static_cast<unsigned long long>(sdk_timestamp_us),
+                        sdk_scan_period_ms,
+                        scan_duration * 1e3,
+                        (count - 1) * sample_duration * 1e3
+                    );
 
                     size_t invalid_count = 0;
                     size_t sync_count = 0;
