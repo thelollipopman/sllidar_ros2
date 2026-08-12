@@ -34,11 +34,15 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <std_srvs/srv/empty.hpp>
 #include "sl_lidar.h"
 #include "math.h"
 
 #include <signal.h>
+#include <limits>
+#include <algorithm>
 
 #ifndef _countof
 #define _countof(_Array) (int)(sizeof(_Array) / sizeof(_Array[0]))
@@ -60,6 +64,7 @@ class SLlidarNode : public rclcpp::Node
     {
 
       scan_pub = this->create_publisher<sensor_msgs::msg::LaserScan>("scan", rclcpp::QoS(rclcpp::KeepLast(10)));
+      cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("scan_points",rclcpp::SensorDataQoS());
       
     }
 
@@ -196,6 +201,72 @@ class SLlidarNode : public rclcpp::Node
     static float getAngle(const sl_lidar_response_measurement_node_hq_t& node)
     {
         return node.angle_z_q14 * 90.f / 16384.f;
+    }
+
+    void publish_cloud(
+        rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr& pub,
+        sl_lidar_response_measurement_node_hq_t* nodes,
+        size_t node_count,
+        rclcpp::Time start,
+        double sample_duration,
+        std::string frame_id)
+    {
+        sensor_msgs::msg::PointCloud2 cloud;
+
+        cloud.header.stamp = start;
+        cloud.header.frame_id = frame_id;
+
+        cloud.height = 1;
+        cloud.width = node_count;
+        cloud.is_dense = false;
+
+        sensor_msgs::PointCloud2Modifier modifier(cloud);
+
+        modifier.setPointCloud2Fields(
+            5,
+            "x", 1, sensor_msgs::msg::PointField::FLOAT32,
+            "y", 1, sensor_msgs::msg::PointField::FLOAT32,
+            "z", 1, sensor_msgs::msg::PointField::FLOAT32,
+            "intensity", 1, sensor_msgs::msg::PointField::FLOAT32,
+            "time", 1, sensor_msgs::msg::PointField::FLOAT32);
+
+        modifier.resize(node_count);
+
+        sensor_msgs::PointCloud2Iterator<float> iter_x(cloud, "x");
+        sensor_msgs::PointCloud2Iterator<float> iter_y(cloud, "y");
+        sensor_msgs::PointCloud2Iterator<float> iter_z(cloud, "z");
+        sensor_msgs::PointCloud2Iterator<float> iter_intensity(cloud, "intensity");
+        sensor_msgs::PointCloud2Iterator<float> iter_time(cloud, "time");
+
+        for (size_t i = 0; i < node_count;
+            ++i, ++iter_x, ++iter_y, ++iter_z,
+            ++iter_intensity, ++iter_time)
+        {
+            float distance =
+                static_cast<float>(nodes[i].dist_mm_q2) / 4.0f / 1000.0f;
+
+            float angle =
+                static_cast<float>(DEG2RAD(getAngle(nodes[i])));
+
+            if (nodes[i].dist_mm_q2 == 0) {
+                *iter_x = std::numeric_limits<float>::quiet_NaN();
+                *iter_y = std::numeric_limits<float>::quiet_NaN();
+                *iter_z = std::numeric_limits<float>::quiet_NaN();
+            }
+            else {
+                *iter_x = distance * std::cos(angle);
+                *iter_y = distance * std::sin(angle);
+                *iter_z = 0.0f;
+            }
+
+            *iter_intensity =
+                static_cast<float>(nodes[i].quality >> 2);
+
+            *iter_time =
+                static_cast<float>(i * sample_duration);
+        }
+
+        pub->publish(cloud);
     }
 
     void publish_scan(rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr& pub,
@@ -338,8 +409,9 @@ public:
 
         if(SL_IS_OK(op_result))
         {
-            //default frequent is 10 hz (by motor pwm value),  current_scan_mode.us_per_sample is the number of scan point per us
+            //default frequent is 10 hz (by motor pwm value),  current_scan_mode.us_per_sample is the nominal microseconds per sample
             int points_per_circle = (int)(1000*1000/current_scan_mode.us_per_sample/scan_frequency);
+            sample_duration = static_cast<double>(current_scan_mode.us_per_sample) / 1000000.0;
             angle_compensate_multiple = points_per_circle/360.0  + 1;
             if(angle_compensate_multiple < 1) 
             angle_compensate_multiple = 1.0;
@@ -365,6 +437,113 @@ public:
             scan_duration = (end_scan_time - start_scan_time).seconds();
 
             if (op_result == SL_RESULT_OK) {
+
+
+                // ================= DEBUG =================
+                static int debug_scan_count = 0;
+                debug_scan_count++;
+
+                // Only print once every 10 scans
+                if (debug_scan_count % 10 == 0) {
+
+                    size_t invalid_count = 0;
+                    size_t sync_count = 0;
+                    size_t angle_decreases = 0;
+
+                    // Inspect all nodes in this revolution
+                    for (size_t i = 0; i < count; ++i) {
+
+                        // Count invalid returns
+                        if (nodes[i].dist_mm_q2 == 0) {
+                            invalid_count++;
+                        }
+
+                        // Find/count sync nodes
+                        if (nodes[i].flag & SL_LIDAR_RESP_HQ_FLAG_SYNCBIT) {
+                            sync_count++;
+
+                            RCLCPP_INFO(
+                                this->get_logger(),
+                                "SYNC: index=%zu angle=%.2f deg time=%.3f ms",
+                                i,
+                                getAngle(nodes[i]),
+                                i * sample_duration * 1e3
+                            );
+                        }
+
+                        // Check angle progression
+                        if (i > 0) {
+                            float previous_angle = getAngle(nodes[i - 1]);
+                            float current_angle = getAngle(nodes[i]);
+
+                            if (current_angle < previous_angle) {
+                                angle_decreases++;
+                            }
+                        }
+                    }
+
+                    // Overall summary, including point-time-span vs grab duration
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "SCAN: count=%zu invalid=%zu sync=%zu "
+                        "angle_decreases=%zu sample_dt=%.3f us "
+                        "point_time_span=%.3f ms grab_duration=%.3f ms",
+                        count,
+                        invalid_count,
+                        sync_count,
+                        angle_decreases,
+                        sample_duration * 1e6,
+                        (count - 1) * sample_duration * 1e3,
+                        scan_duration * 1e3
+                    );
+
+                    // Print first 5 points
+                    size_t print_count = std::min<size_t>(5, count);
+
+                    RCLCPP_INFO(this->get_logger(), "FIRST POINTS:");
+
+                    for (size_t i = 0; i < print_count; ++i) {
+                        RCLCPP_INFO(
+                            this->get_logger(),
+                            "[%4zu] angle=%7.2f deg dist=%7.3f m "
+                            "quality=%3u flag=%u time=%8.3f ms",
+                            i,
+                            getAngle(nodes[i]),
+                            nodes[i].dist_mm_q2 / 4.0 / 1000.0,
+                            static_cast<unsigned>(nodes[i].quality >> 2),
+                            static_cast<unsigned>(nodes[i].flag),
+                            i * sample_duration * 1e3
+                        );
+                    }
+
+                    // Print last 5 points
+                    RCLCPP_INFO(this->get_logger(), "LAST POINTS:");
+
+                    for (size_t i = count - print_count; i < count; ++i) {
+                        RCLCPP_INFO(
+                            this->get_logger(),
+                            "[%4zu] angle=%7.2f deg dist=%7.3f m "
+                            "quality=%3u flag=%u time=%8.3f ms",
+                            i,
+                            getAngle(nodes[i]),
+                            nodes[i].dist_mm_q2 / 4.0 / 1000.0,
+                            static_cast<unsigned>(nodes[i].quality >> 2),
+                            static_cast<unsigned>(nodes[i].flag),
+                            i * sample_duration * 1e3
+                        );
+                    }
+                }
+                // =============== END DEBUG ===============
+
+                publish_cloud(
+                    cloud_pub,
+                    nodes,
+                    count,
+                    start_scan_time,
+                    sample_duration,
+                    frame_id
+                );
+
                 op_result = drv->ascendScanData(nodes, count);
                 float angle_min = DEG2RAD(0.0f);
                 float angle_max = DEG2RAD(360.0f);
@@ -443,6 +622,7 @@ public:
 
   private:
     rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan_pub;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub;
     rclcpp::Service<std_srvs::srv::Empty>::SharedPtr start_motor_service;
     rclcpp::Service<std_srvs::srv::Empty>::SharedPtr stop_motor_service;
 
@@ -460,6 +640,7 @@ public:
     size_t angle_compensate_multiple = 1;//it stand of angle compensate at per 1 degree
     std::string scan_mode;
     float scan_frequency;
+    double sample_duration = 0.0;
 
     ILidarDriver * drv;    
 };
