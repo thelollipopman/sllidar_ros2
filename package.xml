@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>sllidar_ros2_spinning_lidar</name>
+  <name>sllidar_ros2</name>
   <version>1.0.1</version>
   <description>
     Modified SLAMTEC RPLIDAR ROS 2 driver for preserving acquisition-order scan points and publishing them as PointCloud2 with per-point timing.

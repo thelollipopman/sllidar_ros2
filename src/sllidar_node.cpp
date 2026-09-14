@@ -205,6 +205,8 @@ class SLlidarNode : public rclcpp::Node
         return node.angle_z_q14 * 90.f / 16384.f;
     }
 
+    // Add function to get monotic time in nanoseconds
+
     static int64_t get_monotonic_time_ns()
     {
         struct timespec ts;
@@ -214,6 +216,7 @@ class SLlidarNode : public rclcpp::Node
             + static_cast<int64_t>(ts.tv_nsec);
     }
 
+    // Add function to publish point cloud
     void publish_cloud(
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr& pub,
         sl_lidar_response_measurement_node_hq_t* nodes,
@@ -548,177 +551,6 @@ public:
                 previous_sdk_timestamp_us = sdk_timestamp_us;
                 previous_node_count = count;
 
-
-                // ================= DEBUG =================
-                static int debug_scan_count = 0;
-                debug_scan_count++;
-
-                // Only print once every 10 scans
-                if (debug_scan_count % 10 == 0) {
-
-                    size_t invalid_count = 0;
-                    size_t sync_count = 0;
-                    size_t angle_decreases = 0;
-
-                    // Inspect all nodes in this revolution
-                    for (size_t i = 0; i < count; ++i) {
-
-                        // Count invalid returns
-                        if (nodes[i].dist_mm_q2 == 0) {
-                            invalid_count++;
-                        }
-
-                        // Find/count sync nodes
-                        if (nodes[i].flag & SL_LIDAR_RESP_HQ_FLAG_SYNCBIT) {
-                            sync_count++;
-
-                            RCLCPP_INFO(
-                                this->get_logger(),
-                                "SYNC: index=%zu angle=%.2f deg time=%.3f ms",
-                                i,
-                                getAngle(nodes[i]),
-                                i * estimated_point_duration * 1e3
-                            );
-                        }
-
-                        // Check angle progression
-                        if (i > 0) {
-                            float previous_angle = getAngle(nodes[i - 1]);
-                            float current_angle = getAngle(nodes[i]);
-
-                            if (current_angle < previous_angle) {
-                                angle_decreases++;
-                            }
-                        }
-                    }
-
-                    // Overall summary, including point-time-span vs grab duration
-                    RCLCPP_INFO(
-                        this->get_logger(),
-                        "SCAN: count=%zu invalid=%zu sync=%zu "
-                        "angle_decreases=%zu sample_dt=%.3f us "
-                        "point_time_span=%.3f ms grab_duration=%.3f ms",
-                        count,
-                        invalid_count,
-                        sync_count,
-                        angle_decreases,
-                        sample_duration * 1e6,
-                        (count - 1) * sample_duration * 1e3,
-                        scan_duration * 1e3
-                    );
-
-                    double effective_sample_duration = scan_duration / static_cast<double>(count - 1);
-
-                    RCLCPP_INFO(
-                        this->get_logger(),
-                        "nominal_dt=%.3f us effective_dt=%.3f us "
-                        "point_span=%.3f ms grab_duration=%.3f ms",
-                        sample_duration * 1e6,
-                        effective_sample_duration * 1e6,
-                        (count - 1) * sample_duration * 1e3,
-                        scan_duration * 1e3
-                    );
-
-                    // Print first 5 points
-                    size_t print_count = std::min<size_t>(5, count);
-
-                    RCLCPP_INFO(this->get_logger(), "FIRST POINTS:");
-
-                    for (size_t i = 0; i < print_count; ++i) {
-                        RCLCPP_INFO(
-                            this->get_logger(),
-                            "[%4zu] angle=%7.2f deg dist=%7.3f m "
-                            "quality=%3u flag=%u time=%8.3f ms",
-                            i,
-                            getAngle(nodes[i]),
-                            nodes[i].dist_mm_q2 / 4.0 / 1000.0,
-                            static_cast<unsigned>(nodes[i].quality >> 2),
-                            static_cast<unsigned>(nodes[i].flag),
-                            i * estimated_point_duration * 1e3
-                        );
-                    }
-
-                    // Print last 5 points
-                    RCLCPP_INFO(this->get_logger(), "LAST POINTS:");
-
-                    for (size_t i = count - print_count; i < count; ++i) {
-                        RCLCPP_INFO(
-                            this->get_logger(),
-                            "[%4zu] angle=%7.2f deg dist=%7.3f m "
-                            "quality=%3u flag=%u time=%8.3f ms",
-                            i,
-                            getAngle(nodes[i]),
-                            nodes[i].dist_mm_q2 / 4.0 / 1000.0,
-                            static_cast<unsigned>(nodes[i].quality >> 2),
-                            static_cast<unsigned>(nodes[i].flag),
-                            i * estimated_point_duration * 1e3
-                        );
-                    }
-                }
-                // =============== END DEBUG ===============
-
-                op_result = drv->ascendScanData(nodes, count);
-                float angle_min = DEG2RAD(0.0f);
-                float angle_max = DEG2RAD(360.0f);
-                if (op_result == SL_RESULT_OK) {
-                    if (angle_compensate) {
-                        //const int angle_compensate_multiple = 1;
-                        const int angle_compensate_nodes_count = 360*angle_compensate_multiple;
-                        int angle_compensate_offset = 0;
-                        auto angle_compensate_nodes = new sl_lidar_response_measurement_node_hq_t[angle_compensate_nodes_count];
-                        memset(angle_compensate_nodes, 0, angle_compensate_nodes_count*sizeof(sl_lidar_response_measurement_node_hq_t));
-
-                        size_t i = 0, j = 0;
-                        for( ; i < count; i++ ) {
-                            if (nodes[i].dist_mm_q2 != 0) {
-                                float angle = getAngle(nodes[i]);
-                                int angle_value = (int)(angle * angle_compensate_multiple);
-                                if ((angle_value - angle_compensate_offset) < 0) angle_compensate_offset = angle_value;
-                                for (j = 0; j < angle_compensate_multiple; j++) {
-                                    int angle_compensate_nodes_index = angle_value-angle_compensate_offset + j;
-                                    if(angle_compensate_nodes_index >= angle_compensate_nodes_count)
-                                        angle_compensate_nodes_index = angle_compensate_nodes_count - 1;
-                                    angle_compensate_nodes[angle_compensate_nodes_index] = nodes[i];
-                                }
-                            }
-                        }
-    
-                        publish_scan(scan_pub, angle_compensate_nodes, angle_compensate_nodes_count,
-                                start_scan_time, scan_duration, inverted,
-                                angle_min, angle_max, max_distance,
-                                frame_id);
-
-                        if (angle_compensate_nodes) {
-                            delete[] angle_compensate_nodes;
-                            angle_compensate_nodes = nullptr;
-                        }
-                    } else {
-                        int start_node = 0, end_node = 0;
-                        int i = 0;
-                        // find the first valid node and last valid node
-                        while (nodes[i++].dist_mm_q2 == 0);
-                        start_node = i-1;
-                        i = count -1;
-                        while (nodes[i--].dist_mm_q2 == 0);
-                        end_node = i+1;
-
-                        angle_min = DEG2RAD(getAngle(nodes[start_node]));
-                        angle_max = DEG2RAD(getAngle(nodes[end_node]));
-
-                        publish_scan(scan_pub, &nodes[start_node], end_node-start_node +1,
-                                start_scan_time, scan_duration, inverted,
-                                angle_min, angle_max, max_distance,
-                                frame_id);
-                    }
-                } else if (op_result == SL_RESULT_OPERATION_FAIL) {
-                    // All the data is invalid, just publish them
-                    float angle_min = DEG2RAD(0.0f);
-                    float angle_max = DEG2RAD(359.0f);
-                    publish_scan(scan_pub, nodes, count,
-                                start_scan_time, scan_duration, inverted,
-                                angle_min, angle_max, max_distance,
-                                frame_id);
-                }
             }
 
             rclcpp::spin_some(shared_from_this());
