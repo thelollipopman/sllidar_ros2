@@ -241,7 +241,7 @@ class SLlidarNode : public rclcpp::Node
             "x", 1, sensor_msgs::msg::PointField::FLOAT32,
             "y", 1, sensor_msgs::msg::PointField::FLOAT32,
             "z", 1, sensor_msgs::msg::PointField::FLOAT32,
-            "intensity", 1, sensor_msgs::msg::PointField::FLOAT32,
+            "quality", 1, sensor_msgs::msg::PointField::FLOAT32,
             "time", 1, sensor_msgs::msg::PointField::FLOAT32);
 
         modifier.resize(node_count);
@@ -249,12 +249,12 @@ class SLlidarNode : public rclcpp::Node
         sensor_msgs::PointCloud2Iterator<float> iter_x(cloud, "x");
         sensor_msgs::PointCloud2Iterator<float> iter_y(cloud, "y");
         sensor_msgs::PointCloud2Iterator<float> iter_z(cloud, "z");
-        sensor_msgs::PointCloud2Iterator<float> iter_intensity(cloud, "intensity");
+        sensor_msgs::PointCloud2Iterator<float> iter_quality(cloud, "quality");
         sensor_msgs::PointCloud2Iterator<float> iter_time(cloud, "time");
 
         for (size_t i = 0; i < node_count;
             ++i, ++iter_x, ++iter_y, ++iter_z,
-            ++iter_intensity, ++iter_time)
+            ++iter_quality, ++iter_time)
         {
             float distance =
                 static_cast<float>(nodes[i].dist_mm_q2) / 4.0f / 1000.0f;
@@ -273,7 +273,7 @@ class SLlidarNode : public rclcpp::Node
                 *iter_z = 0.0f;
             }
 
-            *iter_intensity =
+            *iter_quality =
                 static_cast<float>(nodes[i].quality >> 2);
 
             *iter_time =
@@ -513,20 +513,6 @@ public:
                     current_scan_start_ns,
                     this->get_clock()->get_clock_type()
                 );
-
-                double header_age_ms =
-                    (this->now() - current_scan_start_ros).seconds() * 1e3;
-
-                RCLCPP_INFO(
-                    this->get_logger(),
-                    "POINT CLOUD: points=%zu "
-                    "point_dt=%.3f us "
-                    "header_age=%.3f ms",
-                    count,
-                    estimated_point_duration * 1e6,
-                    header_age_ms
-                );
-
 
                 // --------------------------------------------------
                 // Publish current raw scan immediately
